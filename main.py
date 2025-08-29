@@ -81,11 +81,13 @@ class FavourProPlugin(Star):
         self.manager = FavourProManager(data_dir)
 
         self.session_based = config.get("session_based", False)
-        # 正则表达式用于从LLM响应中解析状态更新
-        self.state_pattern = re.compile(
-            r"\[Favour:\s*(-?\d+),\s*Attitude:\s*(.+?),\s*Relationship:\s*(.+?)\]",
-            re.DOTALL
-        )
+        # 【修改前】原来的正则表达式
+        # self.state_pattern = re.compile(
+        #     r"\[Favour:\s*(-?\d+),\s*Attitude:\s*(.+?),\s*Relationship:\s*(.+?)\]",
+        #     re.DOTALL
+        # )
+        # 【修改后】使用一个新的、更通用的正则表达式来找到整个状态块
+        self.state_pattern = re.compile(r"\[(.*?)\]", re.DOTALL)
 
     def _get_session_id(self, event: AstrMessageEvent) -> Optional[str]:
         """根据配置决定是否返回会话ID"""
@@ -138,34 +140,48 @@ class FavourProPlugin(Star):
 
         match = self.state_pattern.search(original_text)
         if match:
-            # 解析新的状态
-            new_state = {
-                "favour": int(match.group(1).strip()),
-                "attitude": match.group(2).strip(),
-                "relationship": match.group(3).strip()
-            }
-            # 更新用户状态
-            self.manager.update_user_state(user_id, new_state, session_id)
+            # 【修改开始】重写解析逻辑以支持部分更新
+            content = match.group(1)  # 获取中括号内的所有内容
 
-            # 从最终回复中移除状态标记
-            cleaned_text = self.state_pattern.sub('', original_text).strip()
-            resp.completion_text = cleaned_text
+            # 先获取当前状态，作为更新的基础
+            new_state = self.manager.get_user_state(user_id, session_id)
+            update_found = False  # 标记是否找到了任何有效的更新
 
-    @filter.command("状态")
-    async def query_favour(self, event: AstrMessageEvent):
-        """查询当前与你的状态"""
-        user_id = event.get_sender_id()
-        session_id = self._get_session_id(event)
+            # 尝试解析 Favour
+            favour_match = re.search(r"Favour:\s*(-?\d+)", content, re.IGNORECASE)
+            if favour_match:
+                try:
+                    new_state["favour"] = int(favour_match.group(1).strip())
+                    update_found = True
+                except (ValueError, TypeError):
+                    pass  # 转换失败则忽略
 
-        state = self.manager.get_user_state(user_id, session_id)
+            # 尝试解析 Attitude
+            # 正则表达式寻找 Attitude: 后面的内容，直到下一个键（Favour, Relationship）或字符串末尾
+            attitude_match = re.search(r"Attitude:\s*(.*?)(?=\s*,\s*(?:Favour|Relationship)|$)", content,
+                                       re.IGNORECASE | re.DOTALL)
+            if attitude_match:
+                value = attitude_match.group(1).strip()
+                if value:  # 确保值不为空
+                    new_state["attitude"] = value
+                    update_found = True
 
-        response_text = (
-            "我与你的当前状态：\n"
-            f"好感度：{state['favour']}\n"
-            f"关系：{state['relationship']}\n"
-            f"印象：{state['attitude']}"
-        )
-        yield event.plain_result(response_text)
+            # 尝试解析 Relationship
+            relationship_match = re.search(r"Relationship:\s*(.*?)(?=\s*,\s*(?:Favour|Attitude)|$)", content,
+                                           re.IGNORECASE | re.DOTALL)
+            if relationship_match:
+                value = relationship_match.group(1).strip()
+                if value:  # 确保值不为空
+                    new_state["relationship"] = value
+                    update_found = True
+
+            # 如果找到了任何有效的更新，则保存状态并清理回复文本
+            if update_found:
+                self.manager.update_user_state(user_id, new_state, session_id)
+                # 从最终回复中移除整个状态标记块
+                cleaned_text = self.state_pattern.sub('', original_text).strip()
+                resp.completion_text = cleaned_text
+            # 【修改结束】如果未找到有效更新，则不做任何事，让可能存在的格式错误的标签暴露出来，便于调试
 
     async def terminate(self):
         """插件终止时，确保所有数据都已保存"""
