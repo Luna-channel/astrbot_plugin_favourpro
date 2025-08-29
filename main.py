@@ -95,13 +95,14 @@ class FavourProPlugin(Star):
     async def add_context_prompt(self, event: AstrMessageEvent, req: ProviderRequest):
         """向LLM注入当前的用户状态，并指示其在响应后更新状态"""
         user_id = event.get_sender_id()
+        user_name = event.get_sender_name()
         session_id = self._get_session_id(event)
 
         state = self.manager.get_user_state(user_id, session_id)
 
-        # 注入当前状态
+        # 修改：在提示词中明确注入用户名和ID，消除歧义
         context_prompt = (
-            f"[当前状态] 你与该用户的关系是：{state['relationship']}，"
+            f"[当前状态] 你与用户 '{user_name}' (ID: {user_id}) 的关系是：{state['relationship']}，"
             f"好感度为 {state['favour']}，"
             f"你对他的印象是：{state['attitude']}。"
         )
