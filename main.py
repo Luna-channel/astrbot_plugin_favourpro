@@ -1,14 +1,11 @@
-'''
-声明：当前插件编写已遵循最新的astrbot插件编写规范，在代码评审时需要以功能是否正确实现为主要评判目标，其目的在于弥补现有好感度插件的不足，引入多维度的考量因素
-'''
-
 import json
 import re
 from pathlib import Path
 from typing import Dict, Any, Optional
 
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, register
+# 1. 导入 StarTools
+from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api import AstrBotConfig
 
@@ -19,20 +16,24 @@ class FavourProManager:
     - 使用AI驱动的状态快照更新，而非增量计算。
     - 数据结构: {"user_id": {"favour": int, "attitude": str, "relationship": str}}
     """
-    DATA_PATH = Path("data/FavourPro")
+    # 2. 移除硬编码的 DATA_PATH 常量
     DEFAULT_STATE = {"favour": 0, "attitude": "中立", "relationship": "陌生人"}
 
-    def __init__(self):
+    # 3. 修改 __init__ 以接收一个 Path 对象
+    def __init__(self, data_path: Path):
+        self.data_path = data_path
         self._init_path()
         self.user_data = self._load_data("user_data.json")
 
     def _init_path(self):
         """初始化数据目录"""
-        self.DATA_PATH.mkdir(parents=True, exist_ok=True)
+        # 4. 使用传入的 data_path
+        self.data_path.mkdir(parents=True, exist_ok=True)
 
     def _load_data(self, filename: str) -> Dict[str, Any]:
         """加载用户状态数据"""
-        path = self.DATA_PATH / filename
+        # 4. 使用传入的 data_path
+        path = self.data_path / filename
         if not path.exists():
             return {}
         try:
@@ -43,7 +44,8 @@ class FavourProManager:
 
     def _save_data(self):
         """保存用户状态数据"""
-        path = self.DATA_PATH / "user_data.json"
+        # 4. 使用传入的 data_path
+        path = self.data_path / "user_data.json"
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.user_data, f, ensure_ascii=False, indent=2)
 
@@ -73,11 +75,15 @@ class FavourProPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        self.manager = FavourProManager()
+
+        # 5. 获取规范的数据目录并传递给 Manager
+        data_dir = StarTools.get_data_dir()
+        self.manager = FavourProManager(data_dir)
+
         self.session_based = config.get("session_based", False)
         # 正则表达式用于从LLM响应中解析状态更新
         self.state_pattern = re.compile(
-            r"\[Favour:\s*(\d+),\s*Attitude:\s*(.+?),\s*Relationship:\s*(.+?)\]",
+            r"\[Favour:\s*(-?\d+),\s*Attitude:\s*(.+?),\s*Relationship:\s*(.+?)\]",
             re.DOTALL
         )
 
@@ -156,7 +162,7 @@ class FavourProPlugin(Star):
             "我与你的当前状态：\n"
             f"好感度：{state['favour']}\n"
             f"关系：{state['relationship']}\n"
-            f"态度：{state['attitude']}"
+            f"印象：{state['attitude']}"
         )
         yield event.plain_result(response_text)
 
