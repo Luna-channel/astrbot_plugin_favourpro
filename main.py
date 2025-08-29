@@ -68,7 +68,7 @@ class FavourProManager:
         self._save_data()
 
 
-@register("FavourPro", "天各一方", "一个由AI驱动的、包含好感度、态度和关系的多维度交互系统", "1.0.0")
+@register("FavourPro", "天各一方", "一个由AI驱动的、包含好感度、态度和关系的多维度交互系统", "1.0.2")
 class FavourProPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
