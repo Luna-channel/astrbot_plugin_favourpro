@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 from astrbot.api.event import filter, AstrMessageEvent
-# 1. 导入 StarTools
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api import AstrBotConfig
@@ -16,23 +15,23 @@ class FavourProManager:
     - 使用AI驱动的状态快照更新，而非增量计算。
     - 数据结构: {"user_id": {"favour": int, "attitude": str, "relationship": str}}
     """
-    # 2. 移除硬编码的 DATA_PATH 常量
     DEFAULT_STATE = {"favour": 0, "attitude": "中立", "relationship": "陌生人"}
 
-    # 3. 修改 __init__ 以接收一个 Path 对象
     def __init__(self, data_path: Path):
+        """
+        初始化管理器，使用由插件主类提供的规范化数据路径。
+        :param data_path: 插件的数据存储目录。
+        """
         self.data_path = data_path
         self._init_path()
         self.user_data = self._load_data("user_data.json")
 
     def _init_path(self):
         """初始化数据目录"""
-        # 4. 使用传入的 data_path
         self.data_path.mkdir(parents=True, exist_ok=True)
 
     def _load_data(self, filename: str) -> Dict[str, Any]:
         """加载用户状态数据"""
-        # 4. 使用传入的 data_path
         path = self.data_path / filename
         if not path.exists():
             return {}
@@ -44,7 +43,6 @@ class FavourProManager:
 
     def _save_data(self):
         """保存用户状态数据"""
-        # 4. 使用传入的 data_path
         path = self.data_path / "user_data.json"
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.user_data, f, ensure_ascii=False, indent=2)
@@ -76,18 +74,26 @@ class FavourProPlugin(Star):
         super().__init__(context)
         self.config = config
 
-        # 5. 获取规范的数据目录并传递给 Manager
+        # 获取规范的数据目录并传递给 Manager
         data_dir = StarTools.get_data_dir()
         self.manager = FavourProManager(data_dir)
 
-        self.session_based = config.get("session_based", False)
-        # 【修改前】原来的正则表达式
-        # self.state_pattern = re.compile(
-        #     r"\[Favour:\s*(-?\d+),\s*Attitude:\s*(.+?),\s*Relationship:\s*(.+?)\]",
-        #     re.DOTALL
-        # )
-        # 【修改后】使用一个新的、更通用的正则表达式来找到整个状态块
-        self.state_pattern = re.compile(r"\[(.*?)\]", re.DOTALL)
+        # 正则表达式用于从LLM响应中解析状态更新
+        self.state_pattern = re.compile(
+            r"\[Favour:\s*(\d+),\s*Attitude:\s*(.+?),\s*Relationship:\s*(.+?)\]",
+            re.DOTALL
+        )
+
+    @property
+    def session_based(self) -> bool:
+        """
+        动态地从配置中读取 session_based 的值，以支持热加载。
+        框架会直接返回最终的布尔值。
+        """
+        # 直接获取布尔值，如果配置项不存在，则默认为 False
+        value = self.config.get("session_based", False)
+        # 确保返回的是布尔类型
+        return bool(value)
 
     def _get_session_id(self, event: AstrMessageEvent) -> Optional[str]:
         """根据配置决定是否返回会话ID"""
@@ -97,14 +103,13 @@ class FavourProPlugin(Star):
     async def add_context_prompt(self, event: AstrMessageEvent, req: ProviderRequest):
         """向LLM注入当前的用户状态，并指示其在响应后更新状态"""
         user_id = event.get_sender_id()
-        user_name = event.get_sender_name()
         session_id = self._get_session_id(event)
 
         state = self.manager.get_user_state(user_id, session_id)
 
-        # 修改：在提示词中明确注入用户名和ID，消除歧义
+        # 注入当前状态
         context_prompt = (
-            f"[当前状态] 你与用户 '{user_name}' (ID: {user_id}) 的关系是：{state['relationship']}，"
+            f"[当前状态] 你与该用户的关系是：{state['relationship']}，"
             f"好感度为 {state['favour']}，"
             f"你对他的印象是：{state['attitude']}。"
         )
@@ -140,48 +145,95 @@ class FavourProPlugin(Star):
 
         match = self.state_pattern.search(original_text)
         if match:
-            # 【修改开始】重写解析逻辑以支持部分更新
-            content = match.group(1)  # 获取中括号内的所有内容
+            # 解析新的状态
+            new_state = {
+                "favour": int(match.group(1).strip()),
+                "attitude": match.group(2).strip(),
+                "relationship": match.group(3).strip()
+            }
+            # 更新用户状态
+            self.manager.update_user_state(user_id, new_state, session_id)
 
-            # 先获取当前状态，作为更新的基础
-            new_state = self.manager.get_user_state(user_id, session_id)
-            update_found = False  # 标记是否找到了任何有效的更新
+            # 从最终回复中移除状态标记
+            cleaned_text = self.state_pattern.sub('', original_text).strip()
+            resp.completion_text = cleaned_text
 
-            # 尝试解析 Favour
-            favour_match = re.search(r"Favour:\s*(-?\d+)", content, re.IGNORECASE)
-            if favour_match:
-                try:
-                    new_state["favour"] = int(favour_match.group(1).strip())
-                    update_found = True
-                except (ValueError, TypeError):
-                    pass  # 转换失败则忽略
+    # ------------------- 管理员命令 -------------------
 
-            # 尝试解析 Attitude
-            # 正则表达式寻找 Attitude: 后面的内容，直到下一个键（Favour, Relationship）或字符串末尾
-            attitude_match = re.search(r"Attitude:\s*(.*?)(?=\s*,\s*(?:Favour|Relationship)|$)", content,
-                                       re.IGNORECASE | re.DOTALL)
-            if attitude_match:
-                value = attitude_match.group(1).strip()
-                if value:  # 确保值不为空
-                    new_state["attitude"] = value
-                    update_found = True
+    def _is_admin(self, event: AstrMessageEvent) -> bool:
+        """检查事件发送者是否为AstrBot管理员"""
+        return event.role == "admin"
 
-            # 尝试解析 Relationship
-            relationship_match = re.search(r"Relationship:\s*(.*?)(?=\s*,\s*(?:Favour|Attitude)|$)", content,
-                                           re.IGNORECASE | re.DOTALL)
-            if relationship_match:
-                value = relationship_match.group(1).strip()
-                if value:  # 确保值不为空
-                    new_state["relationship"] = value
-                    update_found = True
+    @filter.command("查询好感")
+    async def admin_query_status(self, event: AstrMessageEvent, user_id: str):
+        """(管理员) 查询指定用户的状态"""
+        if not self._is_admin(event):
+            yield event.plain_result("错误：此命令仅限管理员使用。")
+            return
 
-            # 如果找到了任何有效的更新，则保存状态并清理回复文本
-            if update_found:
-                self.manager.update_user_state(user_id, new_state, session_id)
-                # 从最终回复中移除整个状态标记块
-                cleaned_text = self.state_pattern.sub('', original_text).strip()
-                resp.completion_text = cleaned_text
-            # 【修改结束】如果未找到有效更新，则不做任何事，让可能存在的格式错误的标签暴露出来，便于调试
+        session_id = self._get_session_id(event)
+        state = self.manager.get_user_state(user_id.strip(), session_id)
+
+        response_text = (
+            f"用户 {user_id} 的状态：\n"
+            f"好感度：{state['favour']}\n"
+            f"关系：{state['relationship']}\n"
+            f"态度：{state['attitude']}"
+        )
+        yield event.plain_result(response_text)
+
+    @filter.command("设置好感")
+    async def admin_set_favour(self, event: AstrMessageEvent, user_id: str, value: str):
+        """(管理员) 设置指定用户的好感度"""
+        if not self._is_admin(event):
+            yield event.plain_result("错误：此命令仅限管理员使用。")
+            return
+
+        try:
+            favour_value = int(value)
+        except ValueError:
+            yield event.plain_result("错误：好感度值必须是一个整数。")
+            return
+
+        user_id = user_id.strip()
+        session_id = self._get_session_id(event)
+        current_state = self.manager.get_user_state(user_id, session_id)
+        current_state['favour'] = favour_value
+        self.manager.update_user_state(user_id, current_state, session_id)
+
+        yield event.plain_result(f"成功：用户 {user_id} 的好感度已设置为 {favour_value}。")
+
+    @filter.command("设置印象")
+    async def admin_set_attitude(self, event: AstrMessageEvent, user_id: str, *, attitude: str):
+        """(管理员) 设置指定用户的印象。支持带空格的文本。"""
+        if not self._is_admin(event):
+            yield event.plain_result("错误：此命令仅限管理员使用。")
+            return
+
+        user_id = user_id.strip()
+        attitude = attitude.strip()
+        session_id = self._get_session_id(event)
+        current_state = self.manager.get_user_state(user_id, session_id)
+        current_state['attitude'] = attitude
+        self.manager.update_user_state(user_id, current_state, session_id)
+
+        yield event.plain_result(f"成功：用户 {user_id} 的态度已设置为 '{attitude}'。")
+
+    @filter.command("设置关系")
+    async def admin_set_relationship(self, event: AstrMessageEvent, user_id: str, *, relationship: str):
+        """(管理员) 设置指定用户的关系。支持带空格的文本。"""
+        if not self._is_admin(event):
+            yield event.plain_result("错误：此命令仅限管理员使用。")
+            return
+
+        user_id = user_id.strip()
+        relationship = relationship.strip()
+        session_id = self._get_session_id(event)
+        current_state = self.manager.get_user_state(user_id, session_id)
+        current_state['relationship'] = relationship
+        self.manager.update_user_state(user_id, current_state, session_id)
+
+        yield event.plain_result(f"成功：用户 {user_id} 的关系已设置为 '{relationship}'。")
 
     async def terminate(self):
         """插件终止时，确保所有数据都已保存"""
