@@ -68,7 +68,7 @@ class FavourProManager:
         self._save_data()
 
 
-@register("FavourPro", "天各一方", "一个由AI驱动的、包含好感度、态度和关系的多维度交互系统", "1.0.2")
+@register("FavourPro", "天各一方", "一个由AI驱动的、包含好感度、态度和关系的多维度交互系统", "1.0.0")
 class FavourProPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -78,11 +78,18 @@ class FavourProPlugin(Star):
         data_dir = StarTools.get_data_dir()
         self.manager = FavourProManager(data_dir)
 
-        # 正则表达式用于从LLM响应中解析状态更新
-        self.state_pattern = re.compile(
-            r"\[Favour:\s*(\d+),\s*Attitude:\s*(.+?),\s*Relationship:\s*(.+?)\]",
+        self.block_pattern = re.compile(
+            r"\[\s*(?:Favour:|Attitude:|Relationship:).*?\]",
             re.DOTALL
         )
+
+        self.favour_pattern = re.compile(r"Favour:\s*(-?\d+)")
+
+        # Attitude的值，应该一直持续到它后面出现 ", Relationship:" 或者 "]" 为止
+        self.attitude_pattern = re.compile(r"Attitude:\s*(.+?)(?=\s*,\s*Relationship:|\])")
+
+        # Relationship的值，就是它后面直到 "]" 之前的所有内容
+        self.relationship_pattern = re.compile(r"Relationship:\s*(.+?)(?=\s*\])")
 
     @property
     def session_based(self) -> bool:
@@ -138,25 +145,47 @@ class FavourProPlugin(Star):
 
     @filter.on_llm_response()
     async def on_llm_resp(self, event: AstrMessageEvent, resp: LLMResponse):
-        """处理LLM响应，解析并更新状态，然后清理特殊标记"""
+        """
+        处理LLM响应，解析并更新状态，然后清理特殊标记 (最终鲁棒版)
+        逻辑: 查找 -> 清理 -> 解析 -> 更新
+        """
         user_id = event.get_sender_id()
         session_id = self._get_session_id(event)
         original_text = resp.completion_text
 
-        match = self.state_pattern.search(original_text)
-        if match:
-            # 解析新的状态
-            new_state = {
-                "favour": int(match.group(1).strip()),
-                "attitude": match.group(2).strip(),
-                "relationship": match.group(3).strip()
-            }
-            # 更新用户状态
-            self.manager.update_user_state(user_id, new_state, session_id)
+        # 1. 查找：使用宽松的 "主模式" 查找状态块
+        block_match = self.block_pattern.search(original_text)
 
-            # 从最终回复中移除状态标记
-            cleaned_text = self.state_pattern.sub('', original_text).strip()
-            resp.completion_text = cleaned_text
+        # 如果没有找到任何看起来像状态块的东西，就直接返回，什么都不做
+        if not block_match:
+            return
+
+        # 2. 清理：立即从回复中移除整个状态块，确保用户不会看到它
+        block_text = block_match.group(0)
+        cleaned_text = original_text.replace(block_text, '').strip()
+        resp.completion_text = cleaned_text
+
+        # 3. 解析：现在，只对我们捕获的 `block_text` 进行详细解析
+        favour_match = self.favour_pattern.search(block_text)
+        attitude_match = self.attitude_pattern.search(block_text)
+        relationship_match = self.relationship_pattern.search(block_text)
+
+        # 如果块里连一个有效参数都找不到，那也直接返回 (虽然不太可能发生)
+        if not (favour_match or attitude_match or relationship_match):
+            return
+
+        # 4. 更新：获取当前状态，并用解析出的新值覆盖
+        current_state = self.manager.get_user_state(user_id, session_id)
+
+        if favour_match:
+            current_state['favour'] = int(favour_match.group(1).strip())
+        if attitude_match:
+            # strip(' ,') 可以清理掉可能存在的多余空格和逗号
+            current_state['attitude'] = attitude_match.group(1).strip(' ,')
+        if relationship_match:
+            current_state['relationship'] = relationship_match.group(1).strip(' ,')
+
+        self.manager.update_user_state(user_id, current_state, session_id)
 
     # ------------------- 管理员命令 -------------------
 
