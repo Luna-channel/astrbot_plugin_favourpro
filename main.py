@@ -68,7 +68,7 @@ class FavourProManager:
         self._save_data()
 
 
-@register("FavourPro", "天各一方", "一个由AI驱动的、包含好感度、态度和关系的多维度交互系统", "1.0.0")
+@register("FavourPro", "天各一方", "一个由AI驱动的、包含好感度、态度和关系的多维度交互系统", "1.0.4")
 class FavourProPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -263,6 +263,133 @@ class FavourProPlugin(Star):
         self.manager.update_user_state(user_id, current_state, session_id)
 
         yield event.plain_result(f"成功：用户 {user_id} 的关系已设置为 '{relationship}'。")
+
+    @filter.command("重置好感")
+    async def admin_reset_user_status(self, event: AstrMessageEvent, user_id: str):
+        """(管理员) 重置指定用户的全部状态为默认值"""
+        if not self._is_admin(event):
+            yield event.plain_result("错误：此命令仅限管理员使用。")
+            return
+
+        user_id = user_id.strip()
+        session_id = self._get_session_id(event)
+        
+        # 为了确保操作的是正确的键，我们先获取当前状态
+        # get_user_state 内部会处理 session_id，我们无需手动拼接 key
+        state = self.manager.get_user_state(user_id, session_id)
+
+        # 如果用户原本就不存在，也会得到默认状态，直接更新即可
+        self.manager.update_user_state(user_id, self.manager.DEFAULT_STATE.copy(), session_id)
+        
+        yield event.plain_result(f"成功：用户 {user_id} 的状态已重置为默认值。")
+
+    @filter.command("重置负面")
+    async def admin_reset_negative_favour(self, event: AstrMessageEvent):
+        """(管理员) 重置所有好感度为负数的用户状态"""
+        if not self._is_admin(event):
+            yield event.plain_result("错误：此命令仅限管理员使用。")
+            return
+        
+        # 找出所有好感度<0的用户key
+        keys_to_reset = [
+            key for key, state in self.manager.user_data.items() 
+            if state.get('favour', 0) < 0
+        ]
+
+        if not keys_to_reset:
+            yield event.plain_result("信息：没有找到任何好感度为负的用户。")
+            return
+
+        # 遍历并重置
+        for key in keys_to_reset:
+            self.manager.user_data[key] = self.manager.DEFAULT_STATE.copy()
+        
+        self.manager._save_data()
+        yield event.plain_result(f"成功：已重置 {len(keys_to_reset)} 个好感度为负的用户。")
+
+    @filter.command("重置全部")
+    async def admin_reset_all_users(self, event: AstrMessageEvent):
+        """(管理员) 重置所有用户的状态数据"""
+        if not self._is_admin(event):
+            yield event.plain_result("错误：此命令仅限管理员使用。")
+            return
+
+        user_count = len(self.manager.user_data)
+        self.manager.user_data.clear()
+        self.manager._save_data()
+        
+        yield event.plain_result(f"成功：已清空并重置全部 {user_count} 个用户的状态数据。")
+
+    @filter.command("好感排行")
+    async def admin_favour_ranking(self, event: AstrMessageEvent, num: str = "10"):
+        """(管理员) 显示好感度最高的N个用户"""
+        if not self._is_admin(event):
+            yield event.plain_result("错误：此命令仅限管理员使用。")
+            return
+        
+        try:
+            limit = int(num)
+            if limit <= 0:
+                raise ValueError
+        except ValueError:
+            yield event.plain_result("错误：排行数量必须是一个正整数。")
+            return
+
+        if not self.manager.user_data:
+            yield event.plain_result("当前没有任何用户数据。")
+            return
+
+        # 按好感度降序排序
+        sorted_users = sorted(
+            self.manager.user_data.items(),
+            key=lambda item: item[1].get('favour', 0),
+            reverse=True
+        )
+
+        response_lines = [f"好感度 TOP {limit} 排行榜："]
+        for i, (user_key, state) in enumerate(sorted_users[:limit]):
+            line = (
+                f"{i + 1}. 用户: {user_key}\n"
+                f"   - 好感: {state['favour']}, 关系: {state['relationship']}, 印象: {state['attitude']}"
+            )
+            response_lines.append(line)
+        
+        yield event.plain_result("\n".join(response_lines))
+
+    @filter.command("负好感排行")
+    async def admin_negative_favour_ranking(self, event: AstrMessageEvent, num: str = "10"):
+        """(管理员) 显示好感度最低的N个用户"""
+        if not self._is_admin(event):
+            yield event.plain_result("错误：此命令仅限管理员使用。")
+            return
+
+        try:
+            limit = int(num)
+            if limit <= 0:
+                raise ValueError
+        except ValueError:
+            yield event.plain_result("错误：排行数量必须是一个正整数。")
+            return
+
+        if not self.manager.user_data:
+            yield event.plain_result("当前没有任何用户数据。")
+            return
+            
+        # 按好感度升序排序
+        sorted_users = sorted(
+            self.manager.user_data.items(),
+            key=lambda item: item[1].get('favour', 0)
+        )
+        
+        response_lines = [f"好感度 BOTTOM {limit} 排行榜："]
+        for i, (user_key, state) in enumerate(sorted_users[:limit]):
+            line = (
+                f"{i + 1}. 用户: {user_key}\n"
+                f"   - 好感: {state['favour']}, 关系: {state['relationship']}, 印象: {state['attitude']}"
+            )
+            response_lines.append(line)
+            
+        yield event.plain_result("\n".join(response_lines))
 
     async def terminate(self):
         """插件终止时，确保所有数据都已保存"""
