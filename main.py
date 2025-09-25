@@ -88,7 +88,7 @@ class FavourProPlugin(Star):
             self.manager.DEFAULT_STATE["relationship"] = self.config.get("initial_relationship")
 
         self.block_pattern = re.compile(
-            r"$$\s*(?:Favour:|Attitude:|Relationship:).*?$$",
+            r"\[\s*(?:Favour:|Attitude:|Relationship:).*?\]",
             re.DOTALL
         )
 
