@@ -15,15 +15,25 @@ class FavourProManager:
     - 使用AI驱动的状态快照更新，而非增量计算。
     - 数据结构: {"user_id": {"favour": int, "attitude": str, "relationship": str}}
     """
-    # 保持原有的类变量，但在运行时可以被覆盖
-    DEFAULT_STATE = {"favour": 20, "attitude": "中立", "relationship": "陌生人"}
 
-    def __init__(self, data_path: Path):
+    def __init__(self, data_path: Path, default_state: Optional[Dict[str, Any]] = None, 
+                 min_favour: Optional[int] = None, max_favour: Optional[int] = None):
         """
         初始化管理器，使用由插件主类提供的规范化数据路径。
         :param data_path: 插件的数据存储目录。
+        :param default_state: 自定义的默认状态，如果不提供则使用内置默认值。
+        :param min_favour: 好感度下限，如果提供则会限制好感度范围。
+        :param max_favour: 好感度上限，如果提供则会限制好感度范围。
         """
         self.data_path = data_path
+        self.min_favour = min_favour
+        self.max_favour = max_favour
+        # 使用实例变量而非类变量，避免多实例间的状态污染
+        self.DEFAULT_STATE = default_state if default_state is not None else {
+            "favour": 20, 
+            "attitude": "中立", 
+            "relationship": "陌生人"
+        }
         self._init_path()
         self.user_data = self._load_data("user_data.json")
 
@@ -59,7 +69,13 @@ class FavourProManager:
         # 确保好感度是整数
         if 'favour' in new_state:
             try:
-                new_state['favour'] = int(new_state['favour'])
+                favour_value = int(new_state['favour'])
+                # 如果配置了范围限制，则进行限制
+                if self.min_favour is not None and favour_value < self.min_favour:
+                    favour_value = self.min_favour
+                if self.max_favour is not None and favour_value > self.max_favour:
+                    favour_value = self.max_favour
+                new_state['favour'] = favour_value
             except (ValueError, TypeError):
                 # 如果转换失败，则保留旧值或默认值
                 current_state = self.get_user_state(user_id, session_id)
@@ -69,7 +85,7 @@ class FavourProManager:
         self._save_data()
 
 
-@register("FavourPro", "天各一方", "一个由AI驱动的、包含好感度、态度和关系的多维度交互系统", "1.0.5")
+@register("FavourPro", "天各一方", "一个由AI驱动的、包含好感度、态度和关系的多维度交互系统", "1.0.4")
 class FavourProPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -77,15 +93,19 @@ class FavourProPlugin(Star):
 
         # 获取规范的数据目录并传递给 Manager
         data_dir = StarTools.get_data_dir()
-        self.manager = FavourProManager(data_dir)
         
-        # 从配置更新默认状态（如果配置中有的话）
-        if self.config.get("initial_favour") is not None:
-            self.manager.DEFAULT_STATE["favour"] = self.config.get("initial_favour")
-        if self.config.get("initial_attitude") is not None:
-            self.manager.DEFAULT_STATE["attitude"] = self.config.get("initial_attitude")
-        if self.config.get("initial_relationship") is not None:
-            self.manager.DEFAULT_STATE["relationship"] = self.config.get("initial_relationship")
+        # 从配置构建默认状态
+        default_state = {
+            "favour": self.config.get("initial_favour", 20),
+            "attitude": self.config.get("initial_attitude", "中立"),
+            "relationship": self.config.get("initial_relationship", "陌生人")
+        }
+        
+        # 获取好感度范围配置
+        min_favour = self.config.get("min_favour")
+        max_favour = self.config.get("max_favour")
+        
+        self.manager = FavourProManager(data_dir, default_state, min_favour, max_favour)
 
         self.block_pattern = re.compile(
             r"\[\s*(?:Favour:|Attitude:|Relationship:).*?\]",

@@ -27,13 +27,13 @@
         "description": "好感度下限",
         "type": "int",
         "default": -100,
-        "hint": "好感度所能达到的最低值。"
+        "hint": "好感度所能达到的最低值。AI生成和管理员设置的好感度都会被限制在此范围内。"
     },
     "max_favour": {
         "description": "好感度上限",
         "type": "int",
         "default": 100,
-        "hint": "好感度所能达到的最高值。"
+        "hint": "好感度所能达到的最高值。AI生成和管理员设置的好感度都会被限制在此范围内。"
     },
     "admin_permission_denied_msg": {
         "description": "管理员命令权限不足提示",
