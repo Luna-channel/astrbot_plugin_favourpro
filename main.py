@@ -108,7 +108,7 @@ class FavourProPlugin(Star):
         self.manager = FavourProManager(data_dir, default_state, min_favour, max_favour)
 
         self.block_pattern = re.compile(
-            r"\[\s*(?:Favour:|Attitude:|Relationship:).*?\]",
+            r"\s*\[\s*(?:F|A|R).*?\]\s*",
             re.DOTALL
         )
 
