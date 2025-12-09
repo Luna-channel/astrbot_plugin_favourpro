@@ -1,5 +1,6 @@
 import json
 import re
+import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -7,6 +8,9 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api import AstrBotConfig
+
+# 配置日志
+logger = logging.getLogger("FavourPro")
 
 
 class FavourProManager:
@@ -30,7 +34,7 @@ class FavourProManager:
         self.max_favour = max_favour
         # 使用实例变量而非类变量，避免多实例间的状态污染
         self.DEFAULT_STATE = default_state if default_state is not None else {
-            "favour": 20, 
+            "favour": 0, 
             "attitude": "中立", 
             "relationship": "陌生人"
         }
@@ -107,9 +111,19 @@ class FavourProPlugin(Star):
         
         self.manager = FavourProManager(data_dir, default_state, min_favour, max_favour)
 
+        # 配置日志级别（可以通过配置控制，默认DEBUG以便调试）
+        log_level = self.config.get("debug_log_level", "DEBUG")
+        if isinstance(log_level, str):
+            log_level = getattr(logging, log_level.upper(), logging.DEBUG)
+        logger.setLevel(log_level)
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+            logger.addHandler(handler)
+
         self.block_pattern = re.compile(
-            r"\s*\[\s*(?:F|A|R).*?\]\s*",
-            re.DOTALL
+            r"\s*\[(?=[^\]]*(?:Favour|Attitude|Relationship|F\s*:|A\s*:|R\s*:))[^\]]*\]\s*",
+            re.IGNORECASE | re.DOTALL
         )
 
         self.favour_pattern = re.compile(r"Favour:\s*(-?\d+)")
@@ -192,39 +206,79 @@ class FavourProPlugin(Star):
         session_id = self._get_session_id(event)
         original_text = resp.completion_text
 
+        # 调试日志：记录函数调用和原始文本
+        logger.debug(f"[FavourPro] on_llm_resp 被调用 - 用户: {user_id}, 会话: {session_id}")
+        logger.debug(f"[FavourPro] 原始文本长度: {len(original_text)}")
+        logger.debug(f"[FavourPro] 原始文本包含状态块关键词: Favour={('Favour' in original_text or 'favour' in original_text)}, Attitude={('Attitude' in original_text or 'attitude' in original_text)}, Relationship={('Relationship' in original_text or 'relationship' in original_text)}")
+        
+        # 检查是否包含方括号（快速预检查）
+        has_brackets = '[' in original_text and ']' in original_text
+        logger.debug(f"[FavourPro] 原始文本包含方括号: {has_brackets}")
+
         # 1. 查找：使用宽松的 "主模式" 查找状态块
-        block_match = self.block_pattern.search(original_text)
+        block_matches = list(self.block_pattern.finditer(original_text))
+        logger.debug(f"[FavourPro] 匹配到的状态块数量: {len(block_matches)}")
 
         # 如果没有找到任何看起来像状态块的东西，就直接返回，什么都不做
-        if not block_match:
+        if not block_matches:
+            logger.debug("[FavourPro] 未找到状态块，直接返回")
             return
 
-        # 2. 清理：立即从回复中移除整个状态块，确保用户不会看到它
-        block_text = block_match.group(0)
-        cleaned_text = original_text.replace(block_text, '').strip()
-        resp.completion_text = cleaned_text
+        # 记录每个匹配到的状态块
+        for i, match in enumerate(block_matches):
+            block_content = match.group(0)
+            logger.debug(f"[FavourPro] 状态块 {i+1}/{len(block_matches)}: 位置 {match.start()}-{match.end()}, 长度 {len(block_content)}")
+            logger.debug(f"[FavourPro] 状态块 {i+1} 内容 (前100字符): {repr(block_content[:100])}")
 
-        # 3. 解析：现在，只对我们捕获的 `block_text` 进行详细解析
+        # 2. 清理：立即从回复中移除所有状态块，确保用户不会看到它们
+        cleaned_text = self.block_pattern.sub('', original_text).strip()
+        logger.debug(f"[FavourPro] 清理后文本长度: {len(cleaned_text)}")
+        logger.debug(f"[FavourPro] 清理后是否还包含状态块关键词: Favour={('Favour' in cleaned_text or 'favour' in cleaned_text)}, Attitude={('Attitude' in cleaned_text or 'attitude' in cleaned_text)}, Relationship={('Relationship' in cleaned_text or 'relationship' in cleaned_text)}")
+        logger.debug(f"[FavourPro] 清理后是否还包含方括号: {('[' in cleaned_text and ']' in cleaned_text)}")
+        
+        # 如果清理后还包含状态块，记录警告
+        if '[' in cleaned_text and ('Favour' in cleaned_text or 'Attitude' in cleaned_text or 'Relationship' in cleaned_text):
+            logger.warning("[FavourPro] ⚠️ 警告：清理后文本仍包含状态块！")
+            logger.warning(f"[FavourPro] 清理后文本 (前200字符): {repr(cleaned_text[:200])}")
+        
+        resp.completion_text = cleaned_text
+        logger.debug(f"[FavourPro] 已设置 resp.completion_text，长度: {len(resp.completion_text)}")
+
+        # 3. 解析：现在，只对我们捕获的最后一个 `block_text` 进行详细解析
+        block_text = block_matches[-1].group(0)
+        logger.debug(f"[FavourPro] 解析最后一个状态块，长度: {len(block_text)}")
+        
         favour_match = self.favour_pattern.search(block_text)
         attitude_match = self.attitude_pattern.search(block_text)
         relationship_match = self.relationship_pattern.search(block_text)
 
+        logger.debug(f"[FavourPro] 解析结果: Favour={bool(favour_match)}, Attitude={bool(attitude_match)}, Relationship={bool(relationship_match)}")
+
         # 如果块里连一个有效参数都找不到，那也直接返回 (虽然不太可能发生)
         if not (favour_match or attitude_match or relationship_match):
+            logger.warning("[FavourPro] ⚠️ 警告：状态块中未找到任何有效参数！")
+            logger.warning(f"[FavourPro] 状态块内容: {repr(block_text[:200])}")
             return
 
         # 4. 更新：获取当前状态，并用解析出的新值覆盖
         current_state = self.manager.get_user_state(user_id, session_id)
+        logger.debug(f"[FavourPro] 当前状态: {current_state}")
 
         if favour_match:
-            current_state['favour'] = int(favour_match.group(1).strip())
+            new_favour = int(favour_match.group(1).strip())
+            current_state['favour'] = new_favour
+            logger.debug(f"[FavourPro] 更新好感度: {current_state.get('favour')} -> {new_favour}")
         if attitude_match:
-            # strip(' ,') 可以清理掉可能存在的多余空格和逗号
-            current_state['attitude'] = attitude_match.group(1).strip(' ,')
+            new_attitude = attitude_match.group(1).strip(' ,')
+            current_state['attitude'] = new_attitude
+            logger.debug(f"[FavourPro] 更新印象: {current_state.get('attitude')} -> {new_attitude[:50]}...")
         if relationship_match:
-            current_state['relationship'] = relationship_match.group(1).strip(' ,')
+            new_relationship = relationship_match.group(1).strip(' ,')
+            current_state['relationship'] = new_relationship
+            logger.debug(f"[FavourPro] 更新关系: {current_state.get('relationship')} -> {new_relationship[:50]}...")
 
         self.manager.update_user_state(user_id, current_state, session_id)
+        logger.debug(f"[FavourPro] 状态已保存: {current_state}")
 
     # ------------------- 管理员命令 -------------------
 
