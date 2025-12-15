@@ -1,5 +1,5 @@
-name: favourpro（魔改版） # 这是你的插件的唯一识别名。
-display_name: 好感度插件鸭鸭版
+name: favourpro # 这是你的插件的唯一识别名。
+display_name: 好感度插件鸭鸭魔改版
 desc: 好感度插件鸭鸭魔改版，微调提示词，增加更多管理功能。
 help:  # 插件的帮助信息
 version: v1.0.4 # 插件的版本号
