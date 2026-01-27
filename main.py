@@ -90,7 +90,7 @@ class FavourProManager:
         self._save_data()
 
 
-@register("FavourPro", "天各一方＆柯尔", "一个由AI驱动的、包含好感度、态度和关系的多维度交互系统", "1.0.5")
+@register("FavourPro", "天各一方＆柯尔", "一个由AI驱动的、包含好感度、态度和关系的多维度交互系统", "1.0.6")
 class FavourProPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -135,6 +135,11 @@ class FavourProPlugin(Star):
         # Relationship的值，就是它后面直到 "]" 之前的所有内容
         self.relationship_pattern = re.compile(r"Relationship:\s*(.+?)(?=\s*\])")
 
+        # 安装全局拦截器（Monkey Patching）
+        # 这样可以拦截所有直接调用 Provider.text_chat 和 Context.send_message 的情况
+        # 包括 Conversa 等插件的主动回复
+        self._install_global_interceptors(context)
+
     @property
     def session_based(self) -> bool:
         """
@@ -149,6 +154,89 @@ class FavourProPlugin(Star):
     def _get_session_id(self, event: AstrMessageEvent) -> Optional[str]:
         """根据配置决定是否返回会话ID"""
         return event.unified_msg_origin if self.session_based else None
+
+    def _install_global_interceptors(self, context: Context):
+        """
+        安装全局拦截器，通过 Monkey Patching 拦截 Provider.text_chat 和 Context.send_message
+        这样可以确保即使插件（如 Conversa）绑过了框架的钩子系统，好感度标签也能被清理
+        """
+        plugin_self = self  # 保存引用供闭包使用
+        
+        # ==================== 拦截 Context.send_message ====================
+        original_send_message = context.send_message
+        
+        async def patched_send_message(session, message_chain):
+            """包装后的 send_message，在发送前清理好感度标签"""
+            try:
+                # 清理消息链中的好感度标签
+                if message_chain and hasattr(message_chain, 'chain') and message_chain.chain:
+                    for comp in message_chain.chain:
+                        if isinstance(comp, Plain) and comp.text:
+                            original_text = comp.text
+                            cleaned_text = plugin_self.block_pattern.sub('', original_text).strip()
+                            if cleaned_text != original_text:
+                                comp.text = cleaned_text
+                                logger.debug("[FavourPro] send_message 拦截器清理了好感度标签")
+            except Exception as e:
+                logger.warning(f"[FavourPro] send_message 拦截器处理异常: {e}")
+            
+            # 调用原始方法
+            return await original_send_message(session, message_chain)
+        
+        # 替换方法
+        context.send_message = patched_send_message
+        logger.info("[FavourPro] 已安装 Context.send_message 全局拦截器")
+        
+        # ==================== 拦截所有 Provider 的 text_chat ====================
+        def wrap_provider_text_chat(provider):
+            """为单个 Provider 实例包装 text_chat 方法"""
+            if hasattr(provider, '_favourpro_wrapped'):
+                return  # 避免重复包装
+            
+            original_text_chat = provider.text_chat
+            
+            async def patched_text_chat(*args, **kwargs):
+                """包装后的 text_chat，在返回前清理好感度标签"""
+                llm_resp = await original_text_chat(*args, **kwargs)
+                
+                try:
+                    if llm_resp:
+                        # 清理 completion_text
+                        if llm_resp.completion_text:
+                            original_text = llm_resp.completion_text
+                            cleaned_text = plugin_self.block_pattern.sub('', original_text).strip()
+                            if cleaned_text != original_text:
+                                llm_resp.completion_text = cleaned_text
+                                logger.debug("[FavourPro] text_chat 拦截器清理了 completion_text")
+                        
+                        # 清理 result_chain
+                        if llm_resp.result_chain and llm_resp.result_chain.chain:
+                            for comp in llm_resp.result_chain.chain:
+                                if isinstance(comp, Plain) and comp.text:
+                                    original_text = comp.text
+                                    cleaned_text = plugin_self.block_pattern.sub('', original_text).strip()
+                                    if cleaned_text != original_text:
+                                        comp.text = cleaned_text
+                                        logger.debug("[FavourPro] text_chat 拦截器清理了 result_chain")
+                except Exception as e:
+                    logger.warning(f"[FavourPro] text_chat 拦截器处理异常: {e}")
+                
+                return llm_resp
+            
+            provider.text_chat = patched_text_chat
+            provider._favourpro_wrapped = True
+        
+        # 包装所有已存在的 Provider
+        try:
+            for provider in context.get_all_providers():
+                wrap_provider_text_chat(provider)
+            logger.info(f"[FavourPro] 已为 {len(context.get_all_providers())} 个 Provider 安装 text_chat 拦截器")
+        except Exception as e:
+            logger.warning(f"[FavourPro] 安装 Provider 拦截器时出错: {e}")
+        
+        # 保存包装函数供后续使用（如动态添加的 Provider）
+        self._wrap_provider_text_chat = wrap_provider_text_chat
+        self._original_send_message = original_send_message
 
     @filter.on_llm_request()
     async def add_context_prompt(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -497,5 +585,21 @@ class FavourProPlugin(Star):
         yield event.plain_result("\n".join(response_lines))
 
     async def terminate(self):
-        """插件终止时，确保所有数据都已保存"""
+        """插件终止时，确保所有数据都已保存，并清理全局拦截器"""
         self.manager._save_data()
+        
+        # 恢复原始的 send_message 方法
+        if hasattr(self, '_original_send_message') and self._original_send_message:
+            try:
+                self.context.send_message = self._original_send_message
+                logger.info("[FavourPro] 已恢复 Context.send_message 原始方法")
+            except Exception as e:
+                logger.warning(f"[FavourPro] 恢复 send_message 失败: {e}")
+        
+        # 清理 Provider 的包装标记（注意：无法完全恢复，但标记清理后重载插件可以重新包装）
+        try:
+            for provider in self.context.get_all_providers():
+                if hasattr(provider, '_favourpro_wrapped'):
+                    delattr(provider, '_favourpro_wrapped')
+        except Exception as e:
+            logger.warning(f"[FavourPro] 清理 Provider 标记失败: {e}")
